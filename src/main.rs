@@ -213,7 +213,7 @@ fn do_export(conn: &Connection, export: &Export) {
 
             while let Some(row) = rows.next().expect("next") {
                 let hash: String = row.get(0).expect("hash");
-                println!("{}  {}", entry.path().display(), hash);
+                println!("{}  {}", hash, entry.path().display());
             }
         }
     }
