@@ -9,6 +9,7 @@ use sha2::Sha256;
 #[derive(clap::Parser, Debug)]
 enum Command {
     Add(Add),
+    Remove(Remove),
 }
 
 #[derive(clap::Parser, Debug)]
@@ -22,6 +23,11 @@ struct Add {
     files: Vec<PathBuf>,
 }
 
+#[derive(clap::Parser, Debug)]
+struct Remove {
+    files: Vec<PathBuf>,
+}
+
 fn main() {
     let opt = Command::parse();
 
@@ -29,6 +35,7 @@ fn main() {
 
     match opt {
         Command::Add(add) => do_add(&conn, &add),
+        Command::Remove(remove) => do_remove(&conn, &remove),
     }
 }
 
@@ -93,6 +100,28 @@ fn do_add(conn: &Connection, add: &Add) {
     }
 }
 
+fn do_remove(conn: &Connection, remove: &Remove) {
+    let hostname = hostname::get()
+        .expect("hostname")
+        .to_str()
+        .expect("hostname as str")
+        .to_owned();
+
+    let mut stmt = conn
+        .prepare("DELETE FROM hashes WHERE hostname = ? AND path = ?")
+        .expect("prepare statement");
+
+    for file in &remove.files {
+        let abs_path = path::absolute(file)
+            .expect("absolute path")
+            .to_str()
+            .expect("path to string")
+            .to_owned();
+
+        stmt.execute((&hostname, &abs_path)).expect("delete hashes");
+    }
+}
+
 fn init_database() -> Connection {
     let directory = dirs::data_dir().expect("data dir").join("hashlog");
 
@@ -117,7 +146,7 @@ fn init_database() -> Connection {
             hashed_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
-        CREATE INDEX IF NOT EXISTS idx_hashes_path ON hashes (hostname, path);
+        CREATE INDEX IF NOT EXISTS idx_hashes_hostname_path ON hashes (hostname, path);
         "#,
     )
     .expect("initialize schema");
