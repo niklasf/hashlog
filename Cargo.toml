@@ -1,6 +1,6 @@
 [package]
 name = "hashlog"
-description = "Track and verify md5/sha1/sha256 hashes of files"
+description = "Track and verify MD5/SHA1/SHA256 hashes of files"
 version = "0.1.0"
 edition = "2024"
 
