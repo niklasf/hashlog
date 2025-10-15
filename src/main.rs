@@ -5,6 +5,7 @@ use digest::Digest;
 use rusqlite::{Connection, OpenFlags};
 use sha1::Sha1;
 use sha2::Sha256;
+use walkdir::WalkDir;
 
 #[derive(clap::Parser, Debug)]
 enum Command {
@@ -20,12 +21,12 @@ struct Add {
     sha1: bool,
     #[clap(long)]
     sha256: bool,
-    files: Vec<PathBuf>,
+    paths: Vec<PathBuf>,
 }
 
 #[derive(clap::Parser, Debug)]
 struct Remove {
-    files: Vec<PathBuf>,
+    paths: Vec<PathBuf>,
 }
 
 fn main() {
@@ -60,69 +61,76 @@ fn do_add(conn: &Connection, add: &Add) {
         )
         .expect("prepare insert statement");
 
-    for file in &add.files {
-        let abs_path = path::absolute(file)
-            .expect("absolute path")
-            .to_str()
-            .expect("path to string")
-            .to_owned();
-
-        let md5_exists = select_stmt
-            .exists((&hostname, &abs_path, "md5"))
-            .expect("existance");
-        let sha1_exists = select_stmt
-            .exists((&hostname, &abs_path, "sha1"))
-            .expect("existance");
-        let sha256_exists = select_stmt
-            .exists((&hostname, &abs_path, "sha256"))
-            .expect("existance");
-
-        let mut md5 = (add.md5 && !md5_exists).then(md5::Context::new);
-        let mut sha1 = (add.sha1 && !sha1_exists).then(Sha1::new);
-        let mut sha256 = (add.sha256 && !sha256_exists).then(Sha256::new);
-
-        if !md5.is_some() && !sha1.is_some() && !sha256.is_some() {
-            continue;
-        }
-
-        println!("{abs_path}");
-
-        let mut reader = File::open(&abs_path).expect("open file");
-        let mut size = 0;
-
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if let Some(md5) = &mut md5 {
-                        md5.consume(&buffer[..n]);
-                    }
-                    if let Some(sha1) = &mut sha1 {
-                        sha1.update(&buffer[..n]);
-                    }
-                    if let Some(sha256) = &mut sha256 {
-                        sha256.update(&buffer[..n]);
-                    }
-                    size += n as i64;
-                }
-                Err(e) => panic!("Error reading {file:?}: {e}"),
+    for path in &add.paths {
+        for entry in WalkDir::new(path) {
+            let entry = entry.expect("entry");
+            if !entry.file_type().is_file() {
+                continue;
             }
-        }
 
-        if let Some(md5) = md5 {
-            insert_stmt
-                .execute((&hostname, &abs_path, "md5", &md5.finalize().0, size))
-                .expect("insert md5");
-        }
-        if let Some(sha1) = sha1 {
-            insert_stmt
-                .execute((&hostname, &abs_path, "sha1", &sha1.finalize()[..], size))
-                .expect("insert sha1");
-        }
-        if let Some(sha256) = sha256 {
-            insert_stmt
-                .execute((&hostname, &abs_path, "sha256", &sha256.finalize()[..], size))
-                .expect("insert sha256");
+            let abs_path = path::absolute(entry.path())
+                .expect("absolute path")
+                .to_str()
+                .expect("path to string")
+                .to_owned();
+
+            let md5_exists = select_stmt
+                .exists((&hostname, &abs_path, "md5"))
+                .expect("existance");
+            let sha1_exists = select_stmt
+                .exists((&hostname, &abs_path, "sha1"))
+                .expect("existance");
+            let sha256_exists = select_stmt
+                .exists((&hostname, &abs_path, "sha256"))
+                .expect("existance");
+
+            let mut md5 = (add.md5 && !md5_exists).then(md5::Context::new);
+            let mut sha1 = (add.sha1 && !sha1_exists).then(Sha1::new);
+            let mut sha256 = (add.sha256 && !sha256_exists).then(Sha256::new);
+
+            if !md5.is_some() && !sha1.is_some() && !sha256.is_some() {
+                continue;
+            }
+
+            println!("{abs_path}");
+
+            let mut reader = File::open(&abs_path).expect("open file");
+            let mut size = 0;
+
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if let Some(md5) = &mut md5 {
+                            md5.consume(&buffer[..n]);
+                        }
+                        if let Some(sha1) = &mut sha1 {
+                            sha1.update(&buffer[..n]);
+                        }
+                        if let Some(sha256) = &mut sha256 {
+                            sha256.update(&buffer[..n]);
+                        }
+                        size += n as i64;
+                    }
+                    Err(e) => panic!("Error reading {abs_path:?}: {e}"),
+                }
+            }
+
+            if let Some(md5) = md5 {
+                insert_stmt
+                    .execute((&hostname, &abs_path, "md5", &md5.finalize().0, size))
+                    .expect("insert md5");
+            }
+            if let Some(sha1) = sha1 {
+                insert_stmt
+                    .execute((&hostname, &abs_path, "sha1", &sha1.finalize()[..], size))
+                    .expect("insert sha1");
+            }
+            if let Some(sha256) = sha256 {
+                insert_stmt
+                    .execute((&hostname, &abs_path, "sha256", &sha256.finalize()[..], size))
+                    .expect("insert sha256");
+            }
         }
     }
 }
@@ -138,14 +146,18 @@ fn do_remove(conn: &Connection, remove: &Remove) {
         .prepare("DELETE FROM hashes WHERE hostname = ? AND path = ?")
         .expect("prepare statement");
 
-    for file in &remove.files {
-        let abs_path = path::absolute(file)
-            .expect("absolute path")
-            .to_str()
-            .expect("path to string")
-            .to_owned();
+    for path in &remove.paths {
+        for entry in WalkDir::new(path) {
+            let entry = entry.expect("entry");
 
-        stmt.execute((&hostname, &abs_path)).expect("delete hashes");
+            let abs_path = path::absolute(entry.path())
+                .expect("absolute path")
+                .to_str()
+                .expect("path to string")
+                .to_owned();
+
+            stmt.execute((&hostname, &abs_path)).expect("delete hashes");
+        }
     }
 }
 
