@@ -11,6 +11,7 @@ use walkdir::WalkDir;
 enum Command {
     Add(Add),
     Remove(Remove),
+    Export(Export),
 }
 
 #[derive(clap::Parser, Debug)]
@@ -31,6 +32,17 @@ struct Remove {
     paths: Vec<PathBuf>,
 }
 
+#[derive(clap::Parser, Debug)]
+struct Export {
+    #[clap(long)]
+    md5: bool,
+    #[clap(long)]
+    sha1: bool,
+    #[clap(long)]
+    sha256: bool,
+    paths: Vec<PathBuf>,
+}
+
 fn main() {
     let opt = Command::parse();
 
@@ -39,6 +51,7 @@ fn main() {
     match opt {
         Command::Add(add) => do_add(&conn, &add),
         Command::Remove(remove) => do_remove(&conn, &remove),
+        Command::Export(export) => do_export(&conn, &export),
     }
 }
 
@@ -156,6 +169,52 @@ fn do_remove(conn: &Connection, remove: &Remove) {
                 .to_owned();
 
             stmt.execute((&hostname, &abs_path)).expect("delete hashes");
+        }
+    }
+}
+
+fn do_export(conn: &Connection, export: &Export) {
+    let hostname = hostname::get()
+        .expect("hostname")
+        .to_str()
+        .expect("hostname as str")
+        .to_owned();
+
+    assert!(u32::from(export.md5) + u32::from(export.sha1) + u32::from(export.sha256) == 1);
+
+    let algorithm = if export.md5 {
+        "md5"
+    } else if export.sha1 {
+        "sha1"
+    } else {
+        "sha256"
+    };
+
+    let mut stmt = conn
+        .prepare("SELECT LOWER(HEX(hash)) FROM hashes WHERE hostname = ? AND path = ? AND algorithm = ? ORDER BY id DESC LIMIT 1")
+        .expect("prepare statement");
+
+    for path in &export.paths {
+        for entry in WalkDir::new(path) {
+            let entry = entry.expect("entry");
+            if !entry.file_type().is_file() {
+                continue;
+            }
+
+            let abs_path = path::absolute(entry.path())
+                .expect("absolute path")
+                .to_str()
+                .expect("path to string")
+                .to_owned();
+
+            let mut rows = stmt
+                .query((&hostname, &abs_path, algorithm))
+                .expect("query");
+
+            while let Some(row) = rows.next().expect("next") {
+                let hash: String = row.get(0).expect("hash");
+                println!("{}  {}", entry.path().display(), hash);
+            }
         }
     }
 }
