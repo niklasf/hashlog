@@ -63,6 +63,8 @@ fn do_add(conn: &Connection, add: &Add) {
             .expect("path to string")
             .to_owned();
 
+        println!("{abs_path}");
+
         let mut reader = File::open(&abs_path).expect("open file");
 
         let mut md5 = add.md5.then(md5::Context::new);
