@@ -51,7 +51,9 @@ fn do_add(conn: &Connection, add: &Add) {
     let mut buffer = [0; 1 << 14];
 
     let mut stmt = conn
-        .prepare("INSERT INTO hashes (hostname, path, algorithm, hash) VALUES (?, ?, ?, ?)")
+        .prepare(
+            "INSERT INTO hashes (hostname, path, algorithm, hash, size) VALUES (?, ?, ?, ?, ?)",
+        )
         .expect("prepare statement");
 
     for file in &add.files {
@@ -66,6 +68,7 @@ fn do_add(conn: &Connection, add: &Add) {
         let mut md5 = add.md5.then(md5::Context::new);
         let mut sha1 = add.sha1.then(Sha1::new);
         let mut sha256 = add.sha256.then(Sha256::new);
+        let mut size = 0;
 
         loop {
             match reader.read(&mut buffer) {
@@ -80,21 +83,22 @@ fn do_add(conn: &Connection, add: &Add) {
                     if let Some(sha256) = &mut sha256 {
                         sha256.update(&buffer[..n]);
                     }
+                    size += n as i64;
                 }
                 Err(e) => panic!("Error reading {file:?}: {e}"),
             }
         }
 
         if let Some(md5) = md5 {
-            stmt.execute((&hostname, &abs_path, "md5", &md5.finalize().0))
+            stmt.execute((&hostname, &abs_path, "md5", &md5.finalize().0, size))
                 .expect("insert md5");
         }
         if let Some(sha1) = sha1 {
-            stmt.execute((&hostname, &abs_path, "sha1", &sha1.finalize()[..]))
+            stmt.execute((&hostname, &abs_path, "sha1", &sha1.finalize()[..], size))
                 .expect("insert sha1");
         }
         if let Some(sha256) = sha256 {
-            stmt.execute((&hostname, &abs_path, "sha256", &sha256.finalize()[..]))
+            stmt.execute((&hostname, &abs_path, "sha256", &sha256.finalize()[..], size))
                 .expect("insert sha256");
         }
     }
@@ -143,6 +147,7 @@ fn init_database() -> Connection {
             path TEXT NOT NULL,
             algorithm TEXT NOT NULL,
             hash BLOB NOT NULL,
+            size INTEGER NOT NULL,
             hashed_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
