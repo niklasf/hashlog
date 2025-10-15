@@ -1,8 +1,10 @@
 use std::{fs, fs::File, io::Read, path, path::PathBuf};
 
 use clap::Parser;
-use rusqlite::{Connection, OpenFlags, named_params};
-use sha1::{Digest, Sha1};
+use digest::Digest;
+use rusqlite::{Connection, OpenFlags};
+use sha1::Sha1;
+use sha2::Sha256;
 
 #[derive(clap::Parser, Debug)]
 enum Command {
@@ -11,6 +13,12 @@ enum Command {
 
 #[derive(clap::Parser, Debug)]
 struct Add {
+    #[clap(long)]
+    md5: bool,
+    #[clap(long)]
+    sha1: bool,
+    #[clap(long)]
+    sha256: bool,
     files: Vec<PathBuf>,
 }
 
@@ -25,6 +33,8 @@ fn main() {
 }
 
 fn do_add(conn: &Connection, add: &Add) {
+    assert!(add.md5 || add.sha1 || add.sha256);
+
     let hostname = hostname::get()
         .expect("hostname")
         .to_str()
@@ -46,24 +56,40 @@ fn do_add(conn: &Connection, add: &Add) {
 
         let mut reader = File::open(&abs_path).expect("open file");
 
-        let mut md5 = md5::Context::new();
-        let mut sha1 = Sha1::new();
+        let mut md5 = add.md5.then(md5::Context::new);
+        let mut sha1 = add.sha1.then(Sha1::new);
+        let mut sha256 = add.sha256.then(Sha256::new);
 
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(n) => {
-                    md5.consume(&buffer[..n]);
-                    sha1.update(&buffer[..n]);
+                    if let Some(md5) = &mut md5 {
+                        md5.consume(&buffer[..n]);
+                    }
+                    if let Some(sha1) = &mut sha1 {
+                        sha1.update(&buffer[..n]);
+                    }
+                    if let Some(sha256) = &mut sha256 {
+                        sha256.update(&buffer[..n]);
+                    }
                 }
                 Err(e) => panic!("Error reading {file:?}: {e}"),
             }
         }
 
-        stmt.execute((&hostname, &abs_path, "md5", &md5.finalize().0))
-            .expect("insert md5");
-        stmt.execute((&hostname, &abs_path, "sha1", &sha1.finalize()[..]))
-            .expect("insert sha1");
+        if let Some(md5) = md5 {
+            stmt.execute((&hostname, &abs_path, "md5", &md5.finalize().0))
+                .expect("insert md5");
+        }
+        if let Some(sha1) = sha1 {
+            stmt.execute((&hostname, &abs_path, "sha1", &sha1.finalize()[..]))
+                .expect("insert sha1");
+        }
+        if let Some(sha256) = sha256 {
+            stmt.execute((&hostname, &abs_path, "sha256", &sha256.finalize()[..]))
+                .expect("insert sha256");
+        }
     }
 }
 
