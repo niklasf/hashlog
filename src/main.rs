@@ -21,6 +21,8 @@ struct Add {
     sha1: bool,
     #[clap(long)]
     sha256: bool,
+    #[clap(long)]
+    update: bool,
     paths: Vec<PathBuf>,
 }
 
@@ -51,15 +53,20 @@ fn do_add(conn: &Connection, add: &Add) {
 
     let mut buffer = [0; 1 << 14];
 
-    let mut select_stmt = conn
-        .prepare("SELECT hash FROM hashes WHERE hostname = ? AND path = ? AND algorithm = ?")
-        .expect("prepare select statement");
-
     let mut insert_stmt = conn
         .prepare(
             "INSERT INTO hashes (hostname, path, algorithm, hash, size) VALUES (?, ?, ?, ?, ?)",
         )
         .expect("prepare insert statement");
+
+    let exists = |abs_path: &str, algorithm: &str| {
+        conn.prepare_cached(
+            "SELECT hash FROM hashes WHERE hostname = ? AND path = ? AND algorithm = ?",
+        )
+        .expect("prepare select statement")
+        .exists((&hostname, &abs_path, algorithm))
+        .expect("existance")
+    };
 
     for path in &add.paths {
         for entry in WalkDir::new(path) {
@@ -74,19 +81,11 @@ fn do_add(conn: &Connection, add: &Add) {
                 .expect("path to string")
                 .to_owned();
 
-            let md5_exists = select_stmt
-                .exists((&hostname, &abs_path, "md5"))
-                .expect("existance");
-            let sha1_exists = select_stmt
-                .exists((&hostname, &abs_path, "sha1"))
-                .expect("existance");
-            let sha256_exists = select_stmt
-                .exists((&hostname, &abs_path, "sha256"))
-                .expect("existance");
-
-            let mut md5 = (add.md5 && !md5_exists).then(md5::Context::new);
-            let mut sha1 = (add.sha1 && !sha1_exists).then(Sha1::new);
-            let mut sha256 = (add.sha256 && !sha256_exists).then(Sha256::new);
+            let mut md5 =
+                (add.md5 && (add.update || !exists(&abs_path, "md5"))).then(md5::Context::new);
+            let mut sha1 = (add.sha1 && (add.update || !exists(&abs_path, "sha1"))).then(Sha1::new);
+            let mut sha256 =
+                (add.sha256 && (add.update || !exists(&abs_path, "sha256"))).then(Sha256::new);
 
             if !md5.is_some() && !sha1.is_some() && !sha256.is_some() {
                 continue;
