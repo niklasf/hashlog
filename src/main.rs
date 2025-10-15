@@ -1,10 +1,8 @@
+use std::{fs, fs::File, io::Read, path, path::PathBuf};
+
 use clap::Parser;
 use rusqlite::{Connection, OpenFlags, named_params};
-use std::fs;
-use std::fs::File;
-use std::io::Read;
-use std::path;
-use std::path::PathBuf;
+use sha1::{Digest, Sha1};
 
 #[derive(clap::Parser, Debug)]
 enum Command {
@@ -36,32 +34,36 @@ fn do_add(conn: &Connection, add: &Add) {
     let mut buffer = [0; 1 << 14];
 
     let mut stmt = conn
-        .prepare("INSERT INTO hashes (hostname, path, algorithm, hash) VALUES (:hostname, :path, :algorithm, :hash)")
+        .prepare("INSERT INTO hashes (hostname, path, algorithm, hash) VALUES (?, ?, ?, ?)")
         .expect("prepare statement");
 
     for file in &add.files {
-        let mut reader = File::open(&file).expect("open file");
+        let abs_path = path::absolute(file)
+            .expect("absolute path")
+            .to_str()
+            .expect("path to string")
+            .to_owned();
+
+        let mut reader = File::open(&abs_path).expect("open file");
 
         let mut md5 = md5::Context::new();
+        let mut sha1 = Sha1::new();
 
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
-                Ok(n) => md5.consume(&buffer[..n]),
+                Ok(n) => {
+                    md5.consume(&buffer[..n]);
+                    sha1.update(&buffer[..n]);
+                }
                 Err(e) => panic!("Error reading {file:?}: {e}"),
             }
         }
 
-        stmt.execute(named_params! {
-            ":hostname": hostname,
-            ":path": path::absolute(file)
-                .expect("absolute path")
-                .to_str()
-                .expect("path to string"),
-            ":algorithm": "md5",
-            ":hash": &md5.finalize().0
-        })
-        .expect("execute statement");
+        stmt.execute((&hostname, &abs_path, "md5", &md5.finalize().0))
+            .expect("insert md5");
+        stmt.execute((&hostname, &abs_path, "sha1", &sha1.finalize()[..]))
+            .expect("insert sha1");
     }
 }
 
