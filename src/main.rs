@@ -1,4 +1,4 @@
-use std::{fs, fs::File, io::Read, path, path::PathBuf};
+use std::{fs, fs::File, io, io::Read, path, path::PathBuf};
 
 use clap::Parser;
 use digest::Digest;
@@ -124,6 +124,7 @@ fn do_add(conn: &Connection, add: &Add) {
                         }
                         size += n as i64;
                     }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                     Err(e) => panic!("Error reading {abs_path:?}: {e}"),
                 }
             }
