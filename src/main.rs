@@ -64,7 +64,7 @@ fn do_add(conn: &Connection, add: &Add) {
         .expect("hostname as str")
         .to_owned();
 
-    let mut buffer = [0; 1 << 14];
+    let mut buffer = [0; 1 << 16];
 
     let mut insert_stmt = conn
         .prepare(
