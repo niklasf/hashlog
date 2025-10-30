@@ -50,9 +50,9 @@ struct Export {
 
 #[derive(clap::Parser, Debug)]
 struct Check {
-    prefixes: Vec<String>,
-    #[clap(long)]
-    checksum_file: PathBuf,
+    checksum_files: Vec<PathBuf>,
+    #[clap(long, num_args = 1..)]
+    prefix: Vec<String>,
 }
 
 fn main() {
@@ -244,44 +244,49 @@ fn do_check(conn: &Connection, check: &Check) {
         .prepare("SELECT path FROM hashes WHERE hash = ? AND hostname = ? ORDER BY id DESC LIMIT 1")
         .expect("prepare statement");
 
-    let reader = BufReader::new(File::open(&check.checksum_file).expect("open checksum file"));
-    for line in reader.lines() {
-        let line = line.expect(&format!("read line from {}", check.checksum_file.display()));
-        let (hash, path) = line
-            .split_once("  ")
-            .or_else(|| line.split_once(" *"))
-            .expect(&format!("split line: {}", line));
-        let hash_bytes = hex::decode(hash).expect(&format!("decode hash: {}", hash));
+    for checksum_file in &check.checksum_files {
+        let reader = BufReader::new(File::open(checksum_file).expect("open checksum file"));
+        for line in reader.lines() {
+            let line = line.expect(&format!("read line from {}", checksum_file.display()));
+            let (hash, path) = line
+                .split_once("  ")
+                .or_else(|| line.split_once(" *"))
+                .expect(&format!("split line: {}", line));
+            let hash_bytes = hex::decode(hash).expect(&format!("decode hash: {}", hash));
 
-        let mut rows = stmt.query((hash_bytes, &hostname)).expect("query");
+            let mut rows = stmt.query((hash_bytes, &hostname)).expect("query");
 
-        let candidate_paths = if check.prefixes.is_empty() {
-            vec![path.to_owned()]
-        } else {
-            check
-                .prefixes
-                .iter()
-                .map(|p| format!("{}/{}", p, path))
-                .collect()
-        };
+            let candidate_paths = if check.prefix.is_empty() {
+                vec![path.to_owned()]
+            } else {
+                check
+                    .prefix
+                    .iter()
+                    .map(|p| format!("{}/{}", p, path))
+                    .collect()
+            };
 
-        let mut found = None;
+            let mut found = None;
+            let mut other_files = Vec::new();
 
-        while let Some(row) = rows.next().expect("next") {
-            let db_path: String = row.get(0).expect("get path");
-            if candidate_paths.contains(&db_path) {
-                found = Some(db_path);
-                break;
+            while let Some(row) = rows.next().expect("next") {
+                let db_path: String = row.get(0).expect("get path");
+                if candidate_paths.contains(&db_path) {
+                    found = Some(db_path);
+                    break;
+                } else {
+                    other_files.push(db_path);
+                }
             }
-        }
 
-        println!(
-            "{}",
-            found.expect(&format!(
-                "hash {} not found for any of {:?}",
-                hash, candidate_paths
-            ))
-        )
+            println!(
+                "{}",
+                found.expect(&format!(
+                    "hash {} of {:?} does not match (but these files have it: {:?})",
+                    hash, path, other_files
+                ))
+            )
+        }
     }
 }
 
