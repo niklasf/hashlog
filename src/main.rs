@@ -205,7 +205,9 @@ fn do_export(conn: &Connection, export: &Export) {
     };
 
     let mut stmt = conn
-        .prepare("SELECT LOWER(HEX(hash)) FROM hashes WHERE hostname = ? AND path = ? AND algorithm = ? ORDER BY id DESC LIMIT 1")
+        .prepare(
+            "SELECT LOWER(HEX(hash)) FROM hashes WHERE hostname = ? AND path = ? AND algorithm = ?",
+        )
         .expect("prepare statement");
 
     for path in &export.paths {
@@ -241,7 +243,7 @@ fn do_check(conn: &Connection, check: &Check) {
         .to_owned();
 
     let mut stmt = conn
-        .prepare("SELECT path FROM hashes WHERE hash = ? AND hostname = ? ORDER BY id DESC LIMIT 1")
+        .prepare("SELECT path FROM hashes WHERE hash = ? AND hostname = ?")
         .expect("prepare statement");
 
     for checksum_file in &check.checksum_files {
@@ -257,7 +259,13 @@ fn do_check(conn: &Connection, check: &Check) {
             let mut rows = stmt.query((hash_bytes, &hostname)).expect("query");
 
             let candidate_paths = if check.prefix.is_empty() {
-                vec![path.to_owned()]
+                vec![
+                    path::absolute(path)
+                        .expect("absolute path")
+                        .to_str()
+                        .expect("path to string")
+                        .to_owned(),
+                ]
             } else {
                 check
                     .prefix
@@ -282,8 +290,8 @@ fn do_check(conn: &Connection, check: &Check) {
             println!(
                 "{}",
                 found.expect(&format!(
-                    "hash {} of {:?} does not match (but these files have it: {:?})",
-                    hash, path, other_files
+                    "hash {} of {:?} does not match (but these files have it: {:?}, candidate paths: {:?}, ...)",
+                    hash, path, other_files, candidate_paths.first()
                 ))
             )
         }
