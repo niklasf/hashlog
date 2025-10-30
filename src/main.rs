@@ -87,9 +87,21 @@ fn do_add(conn: &Connection, add: &Add) {
     let mut buffer = [0; 1 << 16];
 
     let mut insert_stmt = conn
-        .prepare(
-            "INSERT INTO hashes (hostname, path, algorithm, hash, size) VALUES (?, ?, ?, ?, ?)",
-        )
+        .prepare(if add.update {
+            r#"
+            INSERT INTO hashes (hostname, path, algorithm, hash, size)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(hostname, path, algorithm) DO UPDATE SET
+                hash = excluded.hash,
+                size = excluded.size,
+                hashed_at = CURRENT_TIMESTAMP
+            "#
+        } else {
+            r#"
+            INSERT INTO hashes (hostname, path, algorithm, hash, size)
+            VALUES (?, ?, ?, ?, ?)
+            "#
+        })
         .expect("prepare insert statement");
 
     let exists = |abs_path: &str, algorithm: &str| {
@@ -327,7 +339,8 @@ fn do_verify(conn: &Connection) {
                 MAX(CASE WHEN algorithm = 'sha256' THEN hash END) as sha256
             FROM hashes
             WHERE hostname = ?
-            GROUP BY path"#,
+            GROUP BY path
+            "#,
         )
         .expect("prepare hash select statement");
 
