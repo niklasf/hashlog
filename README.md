@@ -2,7 +2,7 @@ hashlog
 =======
 
 When the use case is weird enough that existing tools don't fit perfectly ...
-track and verify MD5/SHA1/SHA256 hashes of files.
+track and verify MD5/SHA1/SHA256 hashes of files in a local database.
 
 Examples
 --------
@@ -21,16 +21,21 @@ file is stored:
 hashlog check /mnt/op1/basemb/k_*.md5 --prefix /mnt/op1/basemb/*_out
 ```
 
-Export hashes of the stored files, relative to the current directory, for
-publishing:
+MD5 would have been good enough, but now we can confidently publish SHA1 or
+SHA256 hashes as well:
 
 ```sh
 cd /mnt/op1/basemb
 hashlog export --sha1 *_out
 ```
 
-Verify all recorded hashes, reading each file from disk:
+Later, verify all recorded hashes, reading each file from disk:
 
 ```sh
 hashlog verify
 ```
+
+License
+-------
+
+GPLv3 or later, see the COPYING file.
