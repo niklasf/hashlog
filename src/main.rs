@@ -17,6 +17,7 @@ enum Command {
     Remove(Remove),
     Export(Export),
     Check(Check),
+    Verify,
 }
 
 #[derive(clap::Parser, Debug)]
@@ -65,6 +66,7 @@ fn main() {
         Command::Remove(remove) => do_remove(&conn, &remove),
         Command::Export(export) => do_export(&conn, &export),
         Command::Check(check) => do_check(&conn, &check),
+        Command::Verify => do_verify(&conn),
     }
 }
 
@@ -113,7 +115,7 @@ fn do_add(conn: &Connection, add: &Add) {
             let mut sha256 =
                 (add.sha256 && (add.update || !exists(&abs_path, "sha256"))).then(Sha256::new);
 
-            if !md5.is_some() && !sha1.is_some() && !sha256.is_some() {
+            if md5.is_none() && sha1.is_none() && sha256.is_none() {
                 continue;
             }
 
@@ -249,12 +251,14 @@ fn do_check(conn: &Connection, check: &Check) {
     for checksum_file in &check.checksum_files {
         let reader = BufReader::new(File::open(checksum_file).expect("open checksum file"));
         for line in reader.lines() {
-            let line = line.expect(&format!("read line from {}", checksum_file.display()));
+            let line =
+                line.unwrap_or_else(|_| panic!("read line from {}", checksum_file.display()));
             let (hash, path) = line
                 .split_once("  ")
                 .or_else(|| line.split_once(" *"))
-                .expect(&format!("split line: {}", line));
-            let hash_bytes = hex::decode(hash).expect(&format!("decode hash: {}", hash));
+                .unwrap_or_else(|| panic!("split line: {}", line));
+            let hash_bytes = hex::decode(hash)
+                .unwrap_or_else(|err| panic!("decode hash {:?} failed: {}", hash, err));
 
             let mut rows = stmt.query((hash_bytes, &hostname)).expect("query");
 
@@ -289,12 +293,100 @@ fn do_check(conn: &Connection, check: &Check) {
 
             println!(
                 "{}",
-                found.expect(&format!(
-                    "hash {} of {:?} does not match (but these files have it: {:?}, candidate paths: {:?}, ...)",
-                    hash, path, other_files, candidate_paths.first()
-                ))
+                found.unwrap_or_else(|| {
+                    panic!("hash {} of {:?} does not match (but these files have it: {:?}, candidate paths: {:?}, ...)",
+                    hash, path, other_files, candidate_paths.first())
+                })
             )
         }
+    }
+}
+
+fn do_verify(conn: &Connection) {
+    let hostname = hostname::get()
+        .expect("hostname")
+        .to_str()
+        .expect("hostname as str")
+        .to_owned();
+
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT
+                id,
+                path,
+                MAX(CASE WHEN algorithm = 'md5' THEN hash END) as md5
+                MAX(CASE WHEN algorithm = 'sha1' THEN hash END) as sha1,
+                MAX(CASE WHEN algorithm = 'sha256' THEN hash END) as sha256
+            FROM hashes
+            WHERE hostname = ?"#,
+        )
+        .expect("prepare hash select statement");
+
+    let mut update_time_stmt = conn
+        .prepare("UPDATE hashes SET hashed_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .expect("prepare update statement");
+
+    let mut rows = stmt.query((&hostname,)).expect("query");
+    while let Some(row) = rows.next().expect("next") {
+        let id: i64 = row.get(0).expect("id");
+        let path: String = row.get(1).expect("path");
+        let target_md5: Option<Vec<u8>> = row.get(2).expect("md5");
+        let target_sha1: Option<Vec<u8>> = row.get(3).expect("sha1");
+        let target_sha256: Option<Vec<u8>> = row.get(4).expect("sha256");
+
+        let mut file = File::open(&path).expect("open");
+
+        let mut buffer = [0; 1 << 16];
+        let mut md5 = target_md5.is_some().then_some(md5::Context::new());
+        let mut sha1 = target_sha1.is_some().then_some(Sha1::new());
+        let mut sha256 = target_sha256.is_some().then_some(Sha256::new());
+
+        loop {
+            match file.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if let Some(md5) = &mut md5 {
+                        md5.consume(&buffer[..n]);
+                    }
+                    if let Some(sha1) = &mut sha1 {
+                        sha1.update(&buffer[..n]);
+                    }
+                    if let Some(sha256) = &mut sha256 {
+                        sha256.update(&buffer[..n]);
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => panic!("Error reading {}: {}", path, e),
+            }
+        }
+
+        if let Some(expected) = target_md5 {
+            assert_eq!(
+                &md5.expect("md5").finalize().0[..],
+                expected,
+                "md5 for: {}",
+                path
+            );
+        }
+        if let Some(expected) = target_sha1 {
+            assert_eq!(
+                &sha1.expect("sha1").finalize()[..],
+                expected,
+                "sha1 for: {}",
+                path
+            );
+        }
+        if let Some(expected) = target_sha256 {
+            assert_eq!(
+                &sha256.expect("sha256").finalize()[..],
+                expected,
+                "sha256 for: {}",
+                path
+            );
+        }
+
+        update_time_stmt.execute((id,)).expect("update hashed_at");
     }
 }
 
