@@ -1,4 +1,8 @@
-use std::{fs, fs::File, io, io::Read, path, path::PathBuf};
+use std::{
+    fs::{self, File},
+    io::{self, BufRead, BufReader, Read},
+    path::{self, PathBuf},
+};
 
 use clap::Parser;
 use digest::Digest;
@@ -12,6 +16,7 @@ enum Command {
     Add(Add),
     Remove(Remove),
     Export(Export),
+    Check(Check),
 }
 
 #[derive(clap::Parser, Debug)]
@@ -43,6 +48,13 @@ struct Export {
     paths: Vec<PathBuf>,
 }
 
+#[derive(clap::Parser, Debug)]
+struct Check {
+    prefixes: Vec<String>,
+    #[clap(long)]
+    checksum_file: PathBuf,
+}
+
 fn main() {
     let opt = Command::parse();
 
@@ -52,6 +64,7 @@ fn main() {
         Command::Add(add) => do_add(&conn, &add),
         Command::Remove(remove) => do_remove(&conn, &remove),
         Command::Export(export) => do_export(&conn, &export),
+        Command::Check(check) => do_check(&conn, &check),
     }
 }
 
@@ -220,6 +233,58 @@ fn do_export(conn: &Connection, export: &Export) {
     }
 }
 
+fn do_check(conn: &Connection, check: &Check) {
+    let hostname = hostname::get()
+        .expect("hostname")
+        .to_str()
+        .expect("hostname as str")
+        .to_owned();
+
+    let mut stmt = conn
+        .prepare("SELECT path FROM hashes WHERE hash = ? AND hostname = ? ORDER BY id DESC LIMIT 1")
+        .expect("prepare statement");
+
+    let reader = BufReader::new(File::open(&check.checksum_file).expect("open checksum file"));
+    for line in reader.lines() {
+        let line = line.expect(&format!("read line from {}", check.checksum_file.display()));
+        let (hash, path) = line
+            .split_once("  ")
+            .or_else(|| line.split_once(" *"))
+            .expect(&format!("split line: {}", line));
+        let hash_bytes = hex::decode(hash).expect(&format!("decode hash: {}", hash));
+
+        let mut rows = stmt.query((hash_bytes, &hostname)).expect("query");
+
+        let candidate_paths = if check.prefixes.is_empty() {
+            vec![path.to_owned()]
+        } else {
+            check
+                .prefixes
+                .iter()
+                .map(|p| format!("{}/{}", p, path))
+                .collect()
+        };
+
+        let mut found = None;
+
+        while let Some(row) = rows.next().expect("next") {
+            let db_path: String = row.get(0).expect("get path");
+            if candidate_paths.contains(&db_path) {
+                found = Some(db_path);
+                break;
+            }
+        }
+
+        println!(
+            "{}",
+            found.expect(&format!(
+                "hash {} not found for any of {:?}",
+                hash, candidate_paths
+            ))
+        )
+    }
+}
+
 fn init_database() -> Connection {
     let directory = dirs::data_dir().expect("data dir").join("hashlog");
 
@@ -245,7 +310,8 @@ fn init_database() -> Connection {
             hashed_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
-        CREATE INDEX IF NOT EXISTS idx_hashes_hostname_path ON hashes (hostname, path);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_hashes_path ON hashes (hostname, path, algorithm);
+        CREATE INDEX IF NOT EXISTS idx_hashes_hash ON hashes (hash);
         "#,
     )
     .expect("initialize schema");
