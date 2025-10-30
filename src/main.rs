@@ -13,10 +13,15 @@ use walkdir::WalkDir;
 
 #[derive(clap::Parser, Debug)]
 enum Command {
+    /// Record hashes of the given files.
     Add(Add),
+    /// Remove recorded hashes of the given files.
     Remove(Remove),
+    /// Export recorded hashes of the given files.
     Export(Export),
+    /// Compare hashes from checksum files against recorded hashes.
     Check(Check),
+    /// Verify recorded hashes against current file contents.
     Verify,
 }
 
@@ -313,27 +318,32 @@ fn do_verify(conn: &Connection) {
         .prepare(
             r#"
             SELECT
-                id,
                 path,
-                MAX(CASE WHEN algorithm = 'md5' THEN hash END) as md5
+                MAX(CASE WHEN algorithm = 'md5' THEN id END) as md5_id,
+                MAX(CASE WHEN algorithm = 'md5' THEN hash END) as md5,
+                MAX(CASE WHEN algorithm = 'sha1' THEN id END) as sha1_id,
                 MAX(CASE WHEN algorithm = 'sha1' THEN hash END) as sha1,
+                MAX(CASE WHEN algorithm = 'sha256' THEN id END) as sha256_id,
                 MAX(CASE WHEN algorithm = 'sha256' THEN hash END) as sha256
             FROM hashes
-            WHERE hostname = ?"#,
+            WHERE hostname = ?
+            GROUP BY path"#,
         )
         .expect("prepare hash select statement");
 
     let mut update_time_stmt = conn
-        .prepare("UPDATE hashes SET hashed_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .prepare("UPDATE hashes SET hashed_at = CURRENT_TIMESTAMP WHERE id IN (?, ?, ?)")
         .expect("prepare update statement");
 
     let mut rows = stmt.query((&hostname,)).expect("query");
     while let Some(row) = rows.next().expect("next") {
-        let id: i64 = row.get(0).expect("id");
-        let path: String = row.get(1).expect("path");
+        let path: String = row.get(0).expect("path");
+        let md5_id: Option<i64> = row.get(1).expect("md5 id");
         let target_md5: Option<Vec<u8>> = row.get(2).expect("md5");
-        let target_sha1: Option<Vec<u8>> = row.get(3).expect("sha1");
-        let target_sha256: Option<Vec<u8>> = row.get(4).expect("sha256");
+        let sha1_id: Option<i64> = row.get(3).expect("sha1 id");
+        let target_sha1: Option<Vec<u8>> = row.get(4).expect("sha1");
+        let sha256_id: Option<i64> = row.get(5).expect("sha256 id");
+        let target_sha256: Option<Vec<u8>> = row.get(6).expect("sha256");
 
         let mut file = File::open(&path).expect("open");
 
@@ -363,8 +373,8 @@ fn do_verify(conn: &Connection) {
 
         if let Some(expected) = target_md5 {
             assert_eq!(
-                &md5.expect("md5").finalize().0[..],
-                expected,
+                hex::encode(&md5.expect("md5").finalize().0[..]),
+                hex::encode(expected),
                 "md5 for: {}",
                 path
             );
@@ -386,7 +396,11 @@ fn do_verify(conn: &Connection) {
             );
         }
 
-        update_time_stmt.execute((id,)).expect("update hashed_at");
+        update_time_stmt
+            .execute((md5_id, sha1_id, sha256_id))
+            .expect("update hashed_at");
+
+        println!("{}", path);
     }
 }
 
