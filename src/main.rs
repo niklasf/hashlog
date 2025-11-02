@@ -340,6 +340,7 @@ fn do_verify(conn: &Connection) {
             FROM hashes
             WHERE hostname = ?
             GROUP BY path
+            ORDER BY hashed_at ASC
             "#,
         )
         .expect("prepare hash select statement");
