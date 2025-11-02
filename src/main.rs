@@ -344,14 +344,16 @@ fn do_verify(conn: &Connection) {
         )
         .expect("size");
 
-    let progress =
-        ProgressBar::with_draw_target(Some(total_size), ProgressDrawTarget::stdout_with_hz(4))
-            .with_style(
-                ProgressStyle::with_template(
-                    "{spinner} {prefix} {wide_bar} {bytes_per_sec:>14} {eta:>7}",
-                )
-                .expect("template"),
-            );
+    let progress = ProgressBar::with_draw_target(
+        Some(total_size),
+        ProgressDrawTarget::stdout_with_hz(4),
+    )
+    .with_style(
+        ProgressStyle::with_template(
+            "{spinner} {wide_bar} {binary_bytes}/{binary_total_bytes} {bytes_per_sec:>14} {eta:>7}",
+        )
+        .expect("template"),
+    );
 
     let mut stmt = conn
         .prepare(
