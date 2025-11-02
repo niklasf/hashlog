@@ -403,7 +403,7 @@ fn do_verify(conn: &Connection, verify: &Verify) {
     )
     .with_style(
         ProgressStyle::with_template(
-            "{spinner} {wide_bar} {binary_bytes}/{binary_total_bytes} {bytes_per_sec:>14} {eta:>7}",
+            "{spinner} {wide_bar} {binary_bytes} / {binary_total_bytes} {bytes_per_sec:>14} {eta:>7}",
         )
         .expect("template"),
     );
