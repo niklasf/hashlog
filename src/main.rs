@@ -2,14 +2,18 @@ use std::{
     fs::{self, File},
     io::{self, BufRead, BufReader, Read},
     path::{self, PathBuf},
+    str::FromStr,
+    time::Duration,
 };
 
 use clap::Parser;
 use digest::Digest;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use jiff::Timestamp;
 use rusqlite::{Connection, OpenFlags};
 use sha1::Sha1;
 use sha2::Sha256;
+use thiserror::Error;
 use walkdir::WalkDir;
 
 #[derive(clap::Parser, Debug)]
@@ -23,7 +27,7 @@ enum Command {
     /// Compare hashes from checksum files against recorded hashes.
     Check(Check),
     /// Verify recorded hashes against current file contents.
-    Verify,
+    Verify(Verify),
 }
 
 #[derive(clap::Parser, Debug)]
@@ -69,6 +73,40 @@ struct Check {
     prefix: Vec<String>,
 }
 
+#[derive(clap::Parser, Debug)]
+struct Verify {
+    #[clap(long)]
+    max_age: Option<Age>,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct Age(Duration);
+
+#[derive(Debug, Error)]
+#[error("invalid age")]
+struct InvalidAge;
+
+impl FromStr for Age {
+    type Err = InvalidAge;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (s, factor) = if let Some(s) = s.strip_suffix('d') {
+            (s, 1000 * 60 * 60 * 24)
+        } else if let Some(s) = s.strip_suffix('h') {
+            (s, 1000 * 60 * 60)
+        } else if let Some(s) = s.strip_suffix('m') {
+            (s, 1000 * 60)
+        } else if let Some(s) = s.strip_suffix("ms") {
+            (s, 1)
+        } else {
+            (s.strip_suffix('s').unwrap_or(s), 1000)
+        };
+        Ok(Age(Duration::from_millis(u64::from(
+            s.trim().parse::<u32>().map_err(|_| InvalidAge)?,
+        )) * factor))
+    }
+}
+
 fn main() {
     let opt = Command::parse();
 
@@ -79,7 +117,7 @@ fn main() {
         Command::Remove(remove) => do_remove(&conn, &remove),
         Command::Export(export) => do_export(&conn, &export),
         Command::Check(check) => do_check(&conn, &check),
-        Command::Verify => do_verify(&conn),
+        Command::Verify(verify) => do_verify(&conn, &verify),
     }
 }
 
@@ -329,20 +367,35 @@ fn do_check(conn: &Connection, check: &Check) {
     }
 }
 
-fn do_verify(conn: &Connection) {
+fn do_verify(conn: &Connection, verify: &Verify) {
     let hostname = hostname::get()
         .expect("hostname")
         .to_str()
         .expect("hostname as str")
         .to_owned();
 
-    let total_size: u64 = conn
-        .query_one(
+    let cutoff_time = verify.max_age.map(|max_age| {
+        Timestamp::now()
+            .saturating_sub(max_age.0)
+            .expect("timestamp arithmetic")
+    });
+
+    let total_size: u64 =
+        conn.query_one(
             "SELECT SUM(size) FROM (SELECT MAX(size) AS size FROM hashes WHERE hostname = ? GROUP BY path)",
             (&hostname,),
             |row| row.get(0),
         )
         .expect("size");
+
+    let skipped_size: u64 = cutoff_time.map_or(0, |cutoff_time| {
+        conn.query_one(
+            "SELECT COALESCE(SUM(size), 0) FROM (SELECT MAX(size) AS size FROM hashes WHERE hostname = ? AND hashed_at > DATETIME(?) GROUP BY path)",
+            (&hostname, cutoff_time),
+            |row| row.get(0),
+        )
+        .expect("skipped size")
+    });
 
     let progress = ProgressBar::with_draw_target(
         Some(total_size),
@@ -354,6 +407,9 @@ fn do_verify(conn: &Connection) {
         )
         .expect("template"),
     );
+
+    progress.inc(skipped_size);
+    progress.reset_elapsed();
 
     let mut stmt = conn
         .prepare(
@@ -367,7 +423,7 @@ fn do_verify(conn: &Connection) {
                 MAX(CASE WHEN algorithm = 'sha256' THEN id END) as sha256_id,
                 MAX(CASE WHEN algorithm = 'sha256' THEN hash END) as sha256
             FROM hashes
-            WHERE hostname = ?
+            WHERE hostname = ? AND (? OR hashed_at <= DATETIME(?))
             GROUP BY path
             ORDER BY hashed_at ASC
             "#,
@@ -378,7 +434,13 @@ fn do_verify(conn: &Connection) {
         .prepare("UPDATE hashes SET hashed_at = CURRENT_TIMESTAMP WHERE id IN (?, ?, ?)")
         .expect("prepare update statement");
 
-    let mut rows = stmt.query((&hostname,)).expect("query");
+    let mut rows = stmt
+        .query((
+            &hostname,
+            cutoff_time.is_none(),
+            cutoff_time.unwrap_or_default(),
+        ))
+        .expect("query");
     while let Some(row) = rows.next().expect("next") {
         let path: String = row.get("path").expect("path");
         let md5_id: Option<i64> = row.get("md5_id").expect("md5 id");
@@ -446,6 +508,8 @@ fn do_verify(conn: &Connection) {
 
         progress.println(path);
     }
+
+    progress.finish();
 }
 
 fn init_database() -> Connection {
