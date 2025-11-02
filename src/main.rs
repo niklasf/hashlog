@@ -6,6 +6,7 @@ use std::{
 
 use clap::Parser;
 use digest::Digest;
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rusqlite::{Connection, OpenFlags};
 use sha1::Sha1;
 use sha2::Sha256;
@@ -335,6 +336,23 @@ fn do_verify(conn: &Connection) {
         .expect("hostname as str")
         .to_owned();
 
+    let total_size: u64 = conn
+        .query_one(
+            "SELECT SUM(size) FROM (SELECT MAX(size) AS size FROM hashes WHERE hostname = ? GROUP BY path)",
+            (&hostname,),
+            |row| row.get(0),
+        )
+        .expect("size");
+
+    let progress =
+        ProgressBar::with_draw_target(Some(total_size), ProgressDrawTarget::stdout_with_hz(4))
+            .with_style(
+                ProgressStyle::with_template(
+                    "{spinner} {prefix} {wide_bar} {bytes_per_sec:>14} {eta:>7}",
+                )
+                .expect("template"),
+            );
+
     let mut stmt = conn
         .prepare(
             r#"
@@ -360,13 +378,13 @@ fn do_verify(conn: &Connection) {
 
     let mut rows = stmt.query((&hostname,)).expect("query");
     while let Some(row) = rows.next().expect("next") {
-        let path: String = row.get(0).expect("path");
-        let md5_id: Option<i64> = row.get(1).expect("md5 id");
-        let target_md5: Option<Vec<u8>> = row.get(2).expect("md5");
-        let sha1_id: Option<i64> = row.get(3).expect("sha1 id");
-        let target_sha1: Option<Vec<u8>> = row.get(4).expect("sha1");
-        let sha256_id: Option<i64> = row.get(5).expect("sha256 id");
-        let target_sha256: Option<Vec<u8>> = row.get(6).expect("sha256");
+        let path: String = row.get("path").expect("path");
+        let md5_id: Option<i64> = row.get("md5_id").expect("md5 id");
+        let target_md5: Option<Vec<u8>> = row.get("md5").expect("md5");
+        let sha1_id: Option<i64> = row.get("sha1_id").expect("sha1 id");
+        let target_sha1: Option<Vec<u8>> = row.get("sha1").expect("sha1");
+        let sha256_id: Option<i64> = row.get("sha256_id").expect("sha256 id");
+        let target_sha256: Option<Vec<u8>> = row.get("sha256").expect("sha256");
 
         let mut file = File::open(&path).expect("open");
 
@@ -388,6 +406,7 @@ fn do_verify(conn: &Connection) {
                     if let Some(sha256) = &mut sha256 {
                         sha256.update(&buffer[..n]);
                     }
+                    progress.inc(n as u64);
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => panic!("Error reading {}: {}", path, e),
@@ -423,7 +442,7 @@ fn do_verify(conn: &Connection) {
             .execute((md5_id, sha1_id, sha256_id))
             .expect("update hashed_at");
 
-        println!("{}", path);
+        progress.println(path);
     }
 }
 
