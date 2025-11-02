@@ -27,15 +27,22 @@ enum Command {
 
 #[derive(clap::Parser, Debug)]
 struct Add {
+    #[command(flatten)]
+    algorithms: AddAlgorithms,
+    #[clap(long)]
+    update: bool,
+    paths: Vec<PathBuf>,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+#[group(required = true)]
+struct AddAlgorithms {
     #[clap(long)]
     md5: bool,
     #[clap(long)]
     sha1: bool,
     #[clap(long)]
     sha256: bool,
-    #[clap(long)]
-    update: bool,
-    paths: Vec<PathBuf>,
 }
 
 #[derive(clap::Parser, Debug)]
@@ -76,7 +83,7 @@ fn main() {
 }
 
 fn do_add(conn: &Connection, add: &Add) {
-    assert!(add.md5 || add.sha1 || add.sha256);
+    assert!(add.algorithms.md5 || add.algorithms.sha1 || add.algorithms.sha256);
 
     let hostname = hostname::get()
         .expect("hostname")
@@ -126,11 +133,13 @@ fn do_add(conn: &Connection, add: &Add) {
                 .expect("path to string")
                 .to_owned();
 
-            let mut md5 =
-                (add.md5 && (add.update || !exists(&abs_path, "md5"))).then(md5::Context::new);
-            let mut sha1 = (add.sha1 && (add.update || !exists(&abs_path, "sha1"))).then(Sha1::new);
-            let mut sha256 =
-                (add.sha256 && (add.update || !exists(&abs_path, "sha256"))).then(Sha256::new);
+            let mut md5 = (add.algorithms.md5 && (add.update || !exists(&abs_path, "md5")))
+                .then(md5::Context::new);
+            let mut sha1 =
+                (add.algorithms.sha1 && (add.update || !exists(&abs_path, "sha1"))).then(Sha1::new);
+            let mut sha256 = (add.algorithms.sha256
+                && (add.update || !exists(&abs_path, "sha256")))
+            .then(Sha256::new);
 
             if md5.is_none() && sha1.is_none() && sha256.is_none() {
                 continue;
