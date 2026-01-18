@@ -487,16 +487,16 @@ fn do_verify(conn: &Connection, verify: &Verify) {
         }
         if let Some(expected) = target_sha1 {
             assert_eq!(
-                &sha1.expect("sha1").finalize()[..],
-                expected,
+                hex::encode(&sha1.expect("sha1").finalize()[..]),
+                hex::encode(expected),
                 "sha1 for: {}",
                 path
             );
         }
         if let Some(expected) = target_sha256 {
             assert_eq!(
-                &sha256.expect("sha256").finalize()[..],
-                expected,
+                hex::encode(&sha256.expect("sha256").finalize()[..]),
+                hex::encode(expected),
                 "sha256 for: {}",
                 path
             );
