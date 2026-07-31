@@ -388,7 +388,7 @@ fn do_verify(conn: &Connection, verify: &Verify) {
         cutoff_time.unwrap_or_default(),
     );
 
-    let (total_size, skipped_size): (u64, u64) = conn
+    let (total_size, skipped_size): (i64, i64) = conn
         .query_one(
             r#"
             SELECT
@@ -405,6 +405,9 @@ fn do_verify(conn: &Connection, verify: &Verify) {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("sizes");
+
+    let total_size: u64 = total_size.try_into().expect("non-negative total size");
+    let skipped_size: u64 = skipped_size.try_into().expect("non-negative skipped size");
 
     let progress = ProgressBar::with_draw_target(
         Some(total_size),
@@ -449,7 +452,11 @@ fn do_verify(conn: &Connection, verify: &Verify) {
     let mut rows = stmt.query(params).expect("query");
     while let Some(row) = rows.next().expect("next") {
         let path: String = row.get("path").expect("path");
-        let recorded_size: u64 = row.get("size").expect("size");
+        let recorded_size: u64 = row
+            .get::<_, i64>("size")
+            .expect("size")
+            .try_into()
+            .expect("non-negative size");
         let md5_id: Option<i64> = row.get("md5_id").expect("md5 id");
         let target_md5: Option<Vec<u8>> = row.get("md5").expect("md5");
         let sha1_id: Option<i64> = row.get("sha1_id").expect("sha1 id");
