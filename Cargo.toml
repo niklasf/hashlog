@@ -3,6 +3,7 @@ name = "hashlog"
 description = "Track and verify MD5/SHA1/SHA256 hashes of files"
 license = "GPL-3.0-or-later"
 version = "0.1.0"
+rust-version = "1.95" # remember to update build.yml
 edition = "2024"
 
 [dependencies]
