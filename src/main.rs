@@ -209,6 +209,7 @@ fn do_add(conn: &Connection, add: &Add) {
                 }
             }
 
+            let tx = conn.unchecked_transaction().expect("begin transaction");
             if let Some(md5) = md5 {
                 insert_stmt
                     .execute((&hostname, &abs_path, "md5", &md5.finalize().0, size))
@@ -224,6 +225,7 @@ fn do_add(conn: &Connection, add: &Add) {
                     .execute((&hostname, &abs_path, "sha256", &sha256.finalize()[..], size))
                     .expect("insert sha256");
             }
+            tx.commit().expect("commit");
         }
     }
 }
