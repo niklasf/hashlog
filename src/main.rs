@@ -380,22 +380,29 @@ fn do_verify(conn: &Connection, verify: &Verify) {
             .expect("timestamp arithmetic")
     });
 
-    let total_size: u64 =
-        conn.query_one(
-            "SELECT SUM(size) FROM (SELECT MAX(size) AS size FROM hashes WHERE hostname = ? GROUP BY path)",
-            (&hostname,),
-            |row| row.get(0),
-        )
-        .expect("size");
+    let params = (
+        &hostname,
+        cutoff_time.is_none(),
+        cutoff_time.unwrap_or_default(),
+    );
 
-    let skipped_size: u64 = cutoff_time.map_or(0, |cutoff_time| {
-        conn.query_one(
-            "SELECT COALESCE(SUM(size), 0) FROM (SELECT MAX(size) AS size FROM hashes WHERE hostname = ? AND hashed_at > DATETIME(?) GROUP BY path)",
-            (&hostname, cutoff_time),
-            |row| row.get(0),
+    let (total_size, skipped_size): (u64, u64) = conn
+        .query_one(
+            r#"
+            SELECT
+                COALESCE(SUM(size), 0),
+                COALESCE(SUM(CASE WHEN stale THEN 0 ELSE size END), 0)
+            FROM (
+                SELECT MAX(size) AS size, (?2 OR MIN(hashed_at) <= DATETIME(?3)) AS stale
+                FROM hashes
+                WHERE hostname = ?1
+                GROUP BY path
+            )
+            "#,
+            params,
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .expect("skipped size")
-    });
+        .expect("sizes");
 
     let progress = ProgressBar::with_draw_target(
         Some(total_size),
@@ -408,7 +415,8 @@ fn do_verify(conn: &Connection, verify: &Verify) {
         .expect("template"),
     );
 
-    progress.inc(skipped_size);
+    let mut accounted_size = skipped_size;
+    progress.set_position(accounted_size);
     progress.reset_elapsed();
 
     let mut stmt = conn
@@ -416,6 +424,7 @@ fn do_verify(conn: &Connection, verify: &Verify) {
             r#"
             SELECT
                 path,
+                MAX(size) as size,
                 MAX(CASE WHEN algorithm = 'md5' THEN id END) as md5_id,
                 MAX(CASE WHEN algorithm = 'md5' THEN hash END) as md5,
                 MAX(CASE WHEN algorithm = 'sha1' THEN id END) as sha1_id,
@@ -423,9 +432,10 @@ fn do_verify(conn: &Connection, verify: &Verify) {
                 MAX(CASE WHEN algorithm = 'sha256' THEN id END) as sha256_id,
                 MAX(CASE WHEN algorithm = 'sha256' THEN hash END) as sha256
             FROM hashes
-            WHERE hostname = ? AND (? OR hashed_at <= DATETIME(?))
+            WHERE hostname = ?1
             GROUP BY path
-            ORDER BY hashed_at ASC
+            HAVING ?2 OR MIN(hashed_at) <= DATETIME(?3)
+            ORDER BY MIN(hashed_at) ASC
             "#,
         )
         .expect("prepare hash select statement");
@@ -434,15 +444,10 @@ fn do_verify(conn: &Connection, verify: &Verify) {
         .prepare("UPDATE hashes SET hashed_at = CURRENT_TIMESTAMP WHERE id IN (?, ?, ?)")
         .expect("prepare update statement");
 
-    let mut rows = stmt
-        .query((
-            &hostname,
-            cutoff_time.is_none(),
-            cutoff_time.unwrap_or_default(),
-        ))
-        .expect("query");
+    let mut rows = stmt.query(params).expect("query");
     while let Some(row) = rows.next().expect("next") {
         let path: String = row.get("path").expect("path");
+        let recorded_size: u64 = row.get("size").expect("size");
         let md5_id: Option<i64> = row.get("md5_id").expect("md5 id");
         let target_md5: Option<Vec<u8>> = row.get("md5").expect("md5");
         let sha1_id: Option<i64> = row.get("sha1_id").expect("sha1 id");
@@ -456,6 +461,7 @@ fn do_verify(conn: &Connection, verify: &Verify) {
         let mut md5 = target_md5.is_some().then_some(md5::Context::new());
         let mut sha1 = target_sha1.is_some().then_some(Sha1::new());
         let mut sha256 = target_sha256.is_some().then_some(Sha256::new());
+        let mut read_size = 0;
 
         loop {
             match file.read(&mut buffer) {
@@ -470,7 +476,8 @@ fn do_verify(conn: &Connection, verify: &Verify) {
                     if let Some(sha256) = &mut sha256 {
                         sha256.update(&buffer[..n]);
                     }
-                    progress.inc(n as u64);
+                    read_size += n as u64;
+                    progress.set_position(accounted_size + recorded_size.min(read_size));
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => panic!("Error reading {}: {}", path, e),
@@ -505,6 +512,9 @@ fn do_verify(conn: &Connection, verify: &Verify) {
         update_time_stmt
             .execute((md5_id, sha1_id, sha256_id))
             .expect("update hashed_at");
+
+        accounted_size += recorded_size;
+        progress.set_position(accounted_size);
 
         progress.println(path);
     }
