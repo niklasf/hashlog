@@ -35,6 +35,13 @@ Later, verify all recorded hashes, reading each file from disk:
 hashlog verify
 ```
 
+Or only verify recorded hashes of files in specific directories (or specific
+files):
+
+```sh
+hashlog verify /mnt/op1/basemb/k_out
+```
+
 License
 -------
 

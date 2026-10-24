@@ -77,6 +77,7 @@ struct Check {
 struct Verify {
     #[clap(long)]
     max_age: Option<Age>,
+    paths: Vec<PathBuf>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -382,6 +383,24 @@ fn do_verify(conn: &Connection, verify: &Verify) {
             .expect("timestamp arithmetic")
     });
 
+    conn.execute_batch("CREATE TEMP TABLE verify_paths (path TEXT NOT NULL)")
+        .expect("create temp table");
+
+    let mut insert_path_stmt = conn
+        .prepare("INSERT INTO verify_paths (path) VALUES (?)")
+        .expect("prepare insert path statement");
+
+    for path in &verify.paths {
+        let abs_path = path::absolute(path)
+            .expect("absolute path")
+            .to_str()
+            .expect("path to string")
+            .trim_end_matches('/')
+            .to_owned();
+
+        insert_path_stmt.execute((&abs_path,)).expect("insert path");
+    }
+
     let params = (
         &hostname,
         cutoff_time.is_none(),
@@ -397,7 +416,14 @@ fn do_verify(conn: &Connection, verify: &Verify) {
             FROM (
                 SELECT MAX(size) AS size, (?2 OR MIN(hashed_at) <= DATETIME(?3)) AS stale
                 FROM hashes
-                WHERE hostname = ?1
+                WHERE hostname = ?1 AND (
+                    NOT EXISTS (SELECT 1 FROM verify_paths)
+                    OR EXISTS (
+                        SELECT 1 FROM verify_paths v
+                        WHERE hashes.path = v.path
+                            OR SUBSTR(hashes.path, 1, LENGTH(v.path) + 1) = v.path || '/'
+                    )
+                )
                 GROUP BY path
             )
             "#,
@@ -437,7 +463,14 @@ fn do_verify(conn: &Connection, verify: &Verify) {
                 MAX(CASE WHEN algorithm = 'sha256' THEN id END) as sha256_id,
                 MAX(CASE WHEN algorithm = 'sha256' THEN hash END) as sha256
             FROM hashes
-            WHERE hostname = ?1
+            WHERE hostname = ?1 AND (
+                NOT EXISTS (SELECT 1 FROM verify_paths)
+                OR EXISTS (
+                    SELECT 1 FROM verify_paths v
+                    WHERE hashes.path = v.path
+                        OR SUBSTR(hashes.path, 1, LENGTH(v.path) + 1) = v.path || '/'
+                )
+            )
             GROUP BY path
             HAVING ?2 OR MIN(hashed_at) <= DATETIME(?3)
             ORDER BY MIN(hashed_at) ASC
