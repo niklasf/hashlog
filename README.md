@@ -46,3 +46,6 @@ License
 -------
 
 GPLv3 or later, see the COPYING file.
+
+`src/xet.rs` is derived from [xet-core](https://github.com/huggingface/xet-core),
+Apache License 2.0, see the COPYING.xet-core file.

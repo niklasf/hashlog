@@ -1,3 +1,5 @@
+mod xet;
+
 use std::{
     fs::{self, File},
     io::{self, BufRead, BufReader, Read},
@@ -15,8 +17,8 @@ use sha1::Sha1;
 use sha2::Sha256;
 use thiserror::Error;
 use walkdir::WalkDir;
-use xet_core_structures::merklehash::{MerkleHash as XetMerkleHash, file_hash as xet_file_hash};
-use xet_data::deduplication::Chunker as XetChunker;
+
+use crate::xet::XetHasher;
 
 #[derive(clap::Parser, Debug)]
 enum Command {
@@ -84,31 +86,6 @@ struct Verify {
     #[clap(long)]
     max_age: Option<Age>,
     paths: Vec<PathBuf>,
-}
-
-#[derive(Default)]
-struct XetHasher {
-    chunker: XetChunker,
-    chunk_hashes: Vec<(XetMerkleHash, u64)>,
-}
-
-impl XetHasher {
-    fn update(&mut self, data: &[u8]) {
-        for chunk in self.chunker.next_block(data, false) {
-            self.chunk_hashes
-                .push((chunk.hash, chunk.data.len() as u64));
-        }
-    }
-
-    // Returns the bytes of the canonical string representation (as displayed
-    // by Hugging Face), so that hex encoding the result yields that string.
-    fn finalize(mut self) -> Vec<u8> {
-        if let Some(chunk) = self.chunker.finish() {
-            self.chunk_hashes
-                .push((chunk.hash, chunk.data.len() as u64));
-        }
-        hex::decode(xet_file_hash(&self.chunk_hashes).hex()).expect("decode xet hash")
-    }
 }
 
 #[derive(Copy, Clone, Debug)]
