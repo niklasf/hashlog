@@ -15,6 +15,8 @@ use sha1::Sha1;
 use sha2::Sha256;
 use thiserror::Error;
 use walkdir::WalkDir;
+use xet_core_structures::merklehash::{MerkleHash as XetMerkleHash, file_hash as xet_file_hash};
+use xet_data::deduplication::Chunker as XetChunker;
 
 #[derive(clap::Parser, Debug)]
 enum Command {
@@ -48,6 +50,8 @@ struct AddAlgorithms {
     sha1: bool,
     #[clap(long)]
     sha256: bool,
+    #[clap(long)]
+    xet: bool,
 }
 
 #[derive(clap::Parser, Debug)]
@@ -63,6 +67,8 @@ struct Export {
     sha1: bool,
     #[clap(long)]
     sha256: bool,
+    #[clap(long)]
+    xet: bool,
     paths: Vec<PathBuf>,
 }
 
@@ -78,6 +84,31 @@ struct Verify {
     #[clap(long)]
     max_age: Option<Age>,
     paths: Vec<PathBuf>,
+}
+
+#[derive(Default)]
+struct XetHasher {
+    chunker: XetChunker,
+    chunk_hashes: Vec<(XetMerkleHash, u64)>,
+}
+
+impl XetHasher {
+    fn update(&mut self, data: &[u8]) {
+        for chunk in self.chunker.next_block(data, false) {
+            self.chunk_hashes
+                .push((chunk.hash, chunk.data.len() as u64));
+        }
+    }
+
+    // Returns the bytes of the canonical string representation (as displayed
+    // by Hugging Face), so that hex encoding the result yields that string.
+    fn finalize(mut self) -> Vec<u8> {
+        if let Some(chunk) = self.chunker.finish() {
+            self.chunk_hashes
+                .push((chunk.hash, chunk.data.len() as u64));
+        }
+        hex::decode(xet_file_hash(&self.chunk_hashes).hex()).expect("decode xet hash")
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -123,7 +154,9 @@ fn main() {
 }
 
 fn do_add(conn: &Connection, add: &Add) {
-    assert!(add.algorithms.md5 || add.algorithms.sha1 || add.algorithms.sha256);
+    assert!(
+        add.algorithms.md5 || add.algorithms.sha1 || add.algorithms.sha256 || add.algorithms.xet
+    );
 
     let hostname = hostname::get()
         .expect("hostname")
@@ -180,8 +213,10 @@ fn do_add(conn: &Connection, add: &Add) {
             let mut sha256 = (add.algorithms.sha256
                 && (add.update || !exists(&abs_path, "sha256")))
             .then(Sha256::new);
+            let mut xet = (add.algorithms.xet && (add.update || !exists(&abs_path, "xet")))
+                .then(XetHasher::default);
 
-            if md5.is_none() && sha1.is_none() && sha256.is_none() {
+            if md5.is_none() && sha1.is_none() && sha256.is_none() && xet.is_none() {
                 continue;
             }
 
@@ -202,6 +237,9 @@ fn do_add(conn: &Connection, add: &Add) {
                         }
                         if let Some(sha256) = &mut sha256 {
                             sha256.update(&buffer[..n]);
+                        }
+                        if let Some(xet) = &mut xet {
+                            xet.update(&buffer[..n]);
                         }
                         size += n as i64;
                     }
@@ -225,6 +263,11 @@ fn do_add(conn: &Connection, add: &Add) {
                 insert_stmt
                     .execute((&hostname, &abs_path, "sha256", &sha256.finalize()[..], size))
                     .expect("insert sha256");
+            }
+            if let Some(xet) = xet {
+                insert_stmt
+                    .execute((&hostname, &abs_path, "xet", &xet.finalize(), size))
+                    .expect("insert xet");
             }
             tx.commit().expect("commit");
         }
@@ -264,14 +307,22 @@ fn do_export(conn: &Connection, export: &Export) {
         .expect("hostname as str")
         .to_owned();
 
-    assert!(u32::from(export.md5) + u32::from(export.sha1) + u32::from(export.sha256) == 1);
+    assert!(
+        u32::from(export.md5)
+            + u32::from(export.sha1)
+            + u32::from(export.sha256)
+            + u32::from(export.xet)
+            == 1
+    );
 
     let algorithm = if export.md5 {
         "md5"
     } else if export.sha1 {
         "sha1"
-    } else {
+    } else if export.sha256 {
         "sha256"
+    } else {
+        "xet"
     };
 
     let mut stmt = conn
@@ -461,7 +512,9 @@ fn do_verify(conn: &Connection, verify: &Verify) {
                 MAX(CASE WHEN algorithm = 'sha1' THEN id END) as sha1_id,
                 MAX(CASE WHEN algorithm = 'sha1' THEN hash END) as sha1,
                 MAX(CASE WHEN algorithm = 'sha256' THEN id END) as sha256_id,
-                MAX(CASE WHEN algorithm = 'sha256' THEN hash END) as sha256
+                MAX(CASE WHEN algorithm = 'sha256' THEN hash END) as sha256,
+                MAX(CASE WHEN algorithm = 'xet' THEN id END) as xet_id,
+                MAX(CASE WHEN algorithm = 'xet' THEN hash END) as xet
             FROM hashes
             WHERE hostname = ?1 AND (
                 NOT EXISTS (SELECT 1 FROM verify_paths)
@@ -479,7 +532,7 @@ fn do_verify(conn: &Connection, verify: &Verify) {
         .expect("prepare hash select statement");
 
     let mut update_time_stmt = conn
-        .prepare("UPDATE hashes SET hashed_at = CURRENT_TIMESTAMP WHERE id IN (?, ?, ?)")
+        .prepare("UPDATE hashes SET hashed_at = CURRENT_TIMESTAMP WHERE id IN (?, ?, ?, ?)")
         .expect("prepare update statement");
 
     let mut rows = stmt.query(params).expect("query");
@@ -496,6 +549,8 @@ fn do_verify(conn: &Connection, verify: &Verify) {
         let target_sha1: Option<Vec<u8>> = row.get("sha1").expect("sha1");
         let sha256_id: Option<i64> = row.get("sha256_id").expect("sha256 id");
         let target_sha256: Option<Vec<u8>> = row.get("sha256").expect("sha256");
+        let xet_id: Option<i64> = row.get("xet_id").expect("xet id");
+        let target_xet: Option<Vec<u8>> = row.get("xet").expect("xet");
 
         let mut file = File::open(&path).expect("open");
 
@@ -503,6 +558,7 @@ fn do_verify(conn: &Connection, verify: &Verify) {
         let mut md5 = target_md5.is_some().then_some(md5::Context::new());
         let mut sha1 = target_sha1.is_some().then_some(Sha1::new());
         let mut sha256 = target_sha256.is_some().then_some(Sha256::new());
+        let mut xet = target_xet.is_some().then(XetHasher::default);
         let mut read_size = 0;
 
         loop {
@@ -517,6 +573,9 @@ fn do_verify(conn: &Connection, verify: &Verify) {
                     }
                     if let Some(sha256) = &mut sha256 {
                         sha256.update(&buffer[..n]);
+                    }
+                    if let Some(xet) = &mut xet {
+                        xet.update(&buffer[..n]);
                     }
                     read_size += n as u64;
                     progress.set_position(accounted_size + recorded_size.min(read_size));
@@ -550,9 +609,17 @@ fn do_verify(conn: &Connection, verify: &Verify) {
                 path
             );
         }
+        if let Some(expected) = target_xet {
+            assert_eq!(
+                hex::encode(xet.expect("xet").finalize()),
+                hex::encode(expected),
+                "xet for: {}",
+                path
+            );
+        }
 
         update_time_stmt
-            .execute((md5_id, sha1_id, sha256_id))
+            .execute((md5_id, sha1_id, sha256_id, xet_id))
             .expect("update hashed_at");
 
         accounted_size += recorded_size;

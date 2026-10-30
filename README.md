@@ -2,7 +2,7 @@ hashlog
 =======
 
 When the use case is weird enough that existing tools don't fit perfectly ...
-track and verify MD5/SHA1/SHA256 hashes of files in a local database.
+track and verify MD5/SHA1/SHA256/Xet hashes of files in a local database.
 
 Examples
 --------
@@ -11,7 +11,7 @@ Compute and store hashes for some tablebase files, efficiently using multiple
 hash algorithms in one pass:
 
 ```sh
-hashlog add /mnt/op1/basemb/*_out --md5 --sha1 --sha256
+hashlog add /mnt/op1/basemb/*_out --md5 --sha1 --sha256 --xet
 ```
 
 Check against known hashes, that do not specify the directory where each
